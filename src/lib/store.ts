@@ -1,12 +1,51 @@
-"use client";
+﻿import { supabase } from "./supabase";
 import { BoqItem, DailyReport, Inspection, Snag } from "./types";
 import { SEED_ITEMS, SEED_SNAGS } from "./data";
-const KI="sapr_items_v1",KS="sapr_snags_v1",KD="sapr_daily_v1",KC="sapr_inspections_v1";
-function read<T>(k:string,f:T):T{if(typeof window==="undefined")return f;try{const r=localStorage.getItem(k);return r?JSON.parse(r):f}catch{return f}}
-function write<T>(k:string,v:T){if(typeof window!=="undefined")localStorage.setItem(k,JSON.stringify(v))}
-export const store={
-  getItems:()=>read<BoqItem[]>(KI,SEED_ITEMS), setItems:(v:BoqItem[])=>write(KI,v),
-  getSnags:()=>read<Snag[]>(KS,SEED_SNAGS), setSnags:(v:Snag[])=>write(KS,v),
-  getDaily:()=>read<DailyReport[]>(KD,[]), setDaily:(v:DailyReport[])=>write(KD,v),
-  getInspections:()=>read<Inspection[]>(KC,[]), setInspections:(v:Inspection[])=>write(KC,v)
+
+export const store = {
+  async getItems(): Promise<BoqItem[]> {
+    const { data, error } = await supabase.from("boq_items").select("*");
+    if (error || !data || data.length === 0) {
+      await supabase.from("boq_items").insert(SEED_ITEMS);
+      return SEED_ITEMS;
+    }
+    return data as BoqItem[];
+  },
+  async setItems(items: BoqItem[]): Promise<void> {
+    await supabase.from("boq_items").delete().neq("id", "");
+    await supabase.from("boq_items").insert(items);
+  },
+
+  async getSnags(): Promise<Snag[]> {
+    const { data, error } = await supabase.from("snags").select("*");
+    if (error || !data || data.length === 0) {
+      await supabase.from("snags").insert(SEED_SNAGS);
+      return SEED_SNAGS;
+    }
+    return data as Snag[];
+  },
+  async setSnags(snags: Snag[]): Promise<void> {
+    await supabase.from("snags").delete().neq("id", "");
+    await supabase.from("snags").insert(snags);
+  },
+
+  async getDaily(): Promise<DailyReport[]> {
+    const { data, error } = await supabase.from("daily_reports").select("*");
+    if (error) return [];
+    return (data || []) as DailyReport[];
+  },
+  async setDaily(reports: DailyReport[]): Promise<void> {
+    await supabase.from("daily_reports").delete().neq("id", "");
+    await supabase.from("daily_reports").insert(reports);
+  },
+
+  async getInspections(): Promise<Inspection[]> {
+    const { data, error } = await supabase.from("inspections").select("*");
+    if (error) return [];
+    return (data || []) as Inspection[];
+  },
+  async setInspections(inspections: Inspection[]): Promise<void> {
+    await supabase.from("inspections").delete().neq("id", "");
+    await supabase.from("inspections").insert(inspections);
+  },
 };
