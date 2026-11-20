@@ -1,0 +1,5 @@
+"use client";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+const links=[{href:"/",label:"Dashboard"},{href:"/remaining",label:"Remaining"},{href:"/snags",label:"SI / Snags"},{href:"/daily",label:"Daily"},{href:"/quality",label:"Quality"},{href:"/analytics",label:"Analytics"}];
+export default function Nav(){const p=usePathname();return(<header className="no-print border-b border-slate-200 bg-white sticky top-0 z-30"><div className="mx-auto max-w-7xl px-4 py-3 flex items-center gap-6"><Link href="/" className="font-bold text-brand-700 whitespace-nowrap">SAPR Tracker</Link><nav className="flex flex-wrap gap-1 text-sm">{links.map(l=>{const a=l.href==="/"?p==="/":p.startsWith(l.href);return(<Link key={l.href} href={l.href} className={"rounded-lg px-3 py-1.5 transition "+(a?"bg-brand-600 text-white":"text-slate-600 hover:bg-slate-100")}>{l.label}</Link>)})}</nav></div></header>)}
