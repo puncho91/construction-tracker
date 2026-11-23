@@ -27,7 +27,7 @@ export default function DashboardPage() {
             Commenced {SEED_PROJECT.commenceDate} · Original completion {SEED_PROJECT.originalCompletion} · +{SEED_PROJECT.timeExtensionDays} days extension · Revised {ps.revisedCompletion.toISOString().slice(0, 10)} · Reporting {SEED_PROJECT.reportingDate}
           </div>
         </div>
-        <Link href="/import" className="btn-primary whitespace-nowrap">+ Import CSV</Link>
+        <Link href="/import" className="btn-primary whitespace-nowrap">+ Import Excel</Link>
       </section>
 
       <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
