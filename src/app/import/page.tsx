@@ -12,12 +12,22 @@ const parseNumber = (val: any) => {
   return Number(cleaned) || 0;
 };
 
-// Expected contract totals per package (for verification only)
 const EXPECTED: Record<string, number> = {
   p1: 9900000, p2: 11333775.92, p3: 239123163.72, p4: 155119536,
   p5: 15759998.65, p6: 19748183.62, p7: 415403544.80,
   p8: 275204660.39, p9: 38925979.96, p10: 114113122.30,
 };
+
+// Detect a package header row: integer 1-10 + description contains package keyword
+const PACKAGE_PATTERN = /works?|fee|fence|tower|perimeter/i;
+function detectPackageHeader(code: string, desc: string): string | null {
+  if (!/^\d{1,2}$/.test(code)) return null;
+  const num = parseInt(code, 10);
+  if (num < 1 || num > 10) return null;
+  if (desc.length > 80) return null;
+  if (!PACKAGE_PATTERN.test(desc)) return null;
+  return `p${num}`;
+}
 
 function parseSheet(rows: any[][]): BoqItem[] {
   let headerRowIndex = -1, codeCol = -1, descCol = -1;
@@ -29,8 +39,7 @@ function parseSheet(rows: any[][]): BoqItem[] {
       const cell = String(row[j] || "").toLowerCase().trim();
       if (cell === "item no" || cell === "item no." || cell === "item" || cell === "item number") {
         for (let k = j + 1; k < Math.min(j + 10, row.length); k++) {
-          const desc = String(row[k] || "").toLowerCase().trim();
-          if (desc.includes("description")) {
+          if (String(row[k] || "").toLowerCase().includes("description")) {
             headerRowIndex = i; codeCol = j; descCol = k;
             break;
           }
@@ -54,13 +63,11 @@ function parseSheet(rows: any[][]): BoqItem[] {
   }
   if (contractCol === -1) {
     for (let j = descCol + 1; j < rows[headerRowIndex].length; j++) {
-      const sample = parseNumber(rows[headerRowIndex + 1]?.[j]);
-      if (sample > 1000) { contractCol = j; break; }
+      if (parseNumber(rows[headerRowIndex + 1]?.[j]) > 1000) { contractCol = j; break; }
     }
   }
   if (contractCol === -1) return [];
 
-  // Build items as an ARRAY (preserves duplicates)
   const items: BoqItem[] = [];
   let currentPkg = "p1";
 
@@ -71,29 +78,26 @@ function parseSheet(rows: any[][]): BoqItem[] {
     const desc = String(row[descCol] || "").trim();
     if (!code || !desc) continue;
 
-    // Track current package (letter codes inherit last numeric package)
-    const pkgMatch = code.match(/^(\d+)/);
-    if (pkgMatch) currentPkg = `p${pkgMatch[1]}`;
-
-    // Skip obvious headers/totals
-    if (code.length > 20) continue;
-    if (/^(no|total|sub\s*total|grand\s*total|description|item|amount|unit|qty|quantity|remark|remarks)$/i.test(code)) continue;
-    const low = desc.toLowerCase();
-    if ((low.includes("total") || low.startsWith("sub")) && desc.length < 40 && !/\d/.test(desc)) continue;
+    // *** KEY FIX: package detection by description, NOT code prefix ***
+    const headerPkg = detectPackageHeader(code, desc);
+    if (headerPkg) {
+      currentPkg = headerPkg;
+      continue; // Skip the parent total row entirely
+    }
 
     const contractAmt = parseNumber(row[contractCol]);
     if (contractAmt === 0) continue;
+
+    const low = desc.toLowerCase();
+    if ((low.includes("total") || low.startsWith("sub")) && desc.length < 40 && !/\d/.test(desc)) continue;
 
     const prev = prevCol >= 0 ? parseNumber(row[prevCol]) : 0;
     const thisPeriod = thisPeriodCol >= 0 ? parseNumber(row[thisPeriodCol]) : 0;
     let toDate = toDateCol >= 0 ? parseNumber(row[toDateCol]) : 0;
     if (toDate === 0) toDate = prev + thisPeriod;
 
-    // Row-indexed ID → each row is unique, no overwrites
-    const id = `row${items.length}_${code.replace(/[^A-Za-z0-9]/g, "_")}_${currentPkg}`;
-
     items.push({
-      id,
+      id: `row${items.length}_${code.replace(/[^A-Za-z0-9]/g, "_")}_${currentPkg}`,
       packageId: currentPkg,
       code,
       description: desc,
@@ -104,10 +108,14 @@ function parseSheet(rows: any[][]): BoqItem[] {
     });
   }
 
-  // Leaf filter: drop rows that have children (e.g. parent "7" when "7.1" exists)
+  // *** KEY FIX: leaf filter scoped to SAME package only ***
   const leaves = items.filter(item => {
     const prefix = item.code + ".";
-    return !items.some(other => other !== item && other.code.startsWith(prefix));
+    return !items.some(other =>
+      other !== item &&
+      other.packageId === item.packageId &&
+      other.code.startsWith(prefix)
+    );
   });
 
   return leaves;
@@ -138,8 +146,8 @@ export default function ImportPage() {
           const ws = workbook.Sheets[sheetName];
           const rows = XLSX.utils.sheet_to_json(ws, { header: 1 }) as any[][];
           const items = parseSheet(rows);
-          if (items.length > 5) {
-            if (!bestResult || items.length > bestResult.items.length) bestResult = { sheetName, items };
+          if (items.length > 5 && (!bestResult || items.length > bestResult.items.length)) {
+            bestResult = { sheetName, items };
           }
         }
 
@@ -184,7 +192,7 @@ export default function ImportPage() {
       <div>
         <Link href="/" className="text-sm text-brand-600 hover:underline">← Back to Dashboard</Link>
         <h1 className="text-2xl font-bold text-slate-900 mt-1">Import BOQ from Excel</h1>
-        <p className="text-sm text-slate-600">Scans all sheets. Preserves duplicate codes and letter-coded sub-items.</p>
+        <p className="text-sm text-slate-600">Scans all sheets. Detects package headers by description, not code prefix.</p>
       </div>
 
       <div className="card p-6">
@@ -199,7 +207,7 @@ export default function ImportPage() {
               <div>
                 <h2 className="font-semibold text-slate-900">Preview: {preview.length} items from "{sourceSheet}"</h2>
                 <p className="text-xs text-slate-500 mt-1">
-                  Total contract: <b>{totalContract.toLocaleString()} ETB</b> · Executed: <b>{totalToDate.toLocaleString()} ETB</b> · Progress: <b>{totalContract ? ((totalToDate / totalContract) * 100).toFixed(1) : 0}%</b>
+                  Total contract: <b>{totalContract.toLocaleString(undefined, {maximumFractionDigits: 0})} ETB</b> · Executed: <b>{totalToDate.toLocaleString(undefined, {maximumFractionDigits: 0})} ETB</b> · Progress: <b>{totalContract ? ((totalToDate / totalContract) * 100).toFixed(1) : 0}%</b>
                 </p>
                 <p className="text-[10px] text-slate-400 mt-1">Scanned: {triedSheets.join(", ")}</p>
               </div>
@@ -211,22 +219,22 @@ export default function ImportPage() {
 
           <div className="card overflow-hidden">
             <div className="p-3 border-b bg-slate-50">
-              <h3 className="font-semibold text-sm">Package verification (compare with Summary Report)</h3>
+              <h3 className="font-semibold text-sm">Package verification (green = matches expected)</h3>
             </div>
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-xs uppercase text-slate-600">
                 <tr>
                   <th className="p-2 text-left">Package</th>
                   <th className="p-2 text-right">Items</th>
-                  <th className="p-2 text-right">Actual Contract</th>
+                  <th className="p-2 text-right">Actual</th>
                   <th className="p-2 text-right">Expected</th>
-                  <th className="p-2 text-right">Gap</th>
+                  <th className="p-2 text-right">Status</th>
                 </tr>
               </thead>
               <tbody>
                 {["p1","p2","p3","p4","p5","p6","p7","p8","p9","p10"].map(pkg => {
                   const s = byPackage[pkg] || { contract: 0, executed: 0, count: 0 };
-                  const exp = EXPECTED[pkg] || 0;
+                  const exp = EXPECTED[pkg];
                   const gap = exp - s.contract;
                   const ok = Math.abs(gap) < exp * 0.02;
                   return (
@@ -236,7 +244,7 @@ export default function ImportPage() {
                       <td className="p-2 text-right">{s.contract.toLocaleString(undefined, {maximumFractionDigits: 0})}</td>
                       <td className="p-2 text-right text-slate-500">{exp.toLocaleString(undefined, {maximumFractionDigits: 0})}</td>
                       <td className={`p-2 text-right font-medium ${ok ? "text-emerald-600" : "text-rose-600"}`}>
-                        {ok ? "✓ OK" : `${gap.toLocaleString(undefined, {maximumFractionDigits: 0})}`}
+                        {ok ? "✓ OK" : gap > 0 ? `Missing ${gap.toLocaleString(undefined, {maximumFractionDigits: 0})}` : `Extra ${(-gap).toLocaleString(undefined, {maximumFractionDigits: 0})}`}
                       </td>
                     </tr>
                   );
@@ -246,7 +254,7 @@ export default function ImportPage() {
                   <td className="p-2 text-right text-xs">{preview.length}</td>
                   <td className="p-2 text-right">{totalContract.toLocaleString(undefined, {maximumFractionDigits: 0})}</td>
                   <td className="p-2 text-right">1,294,631,965</td>
-                  <td className="p-2 text-right">{(1294631965.36 - totalContract).toLocaleString(undefined, {maximumFractionDigits: 0})}</td>
+                  <td className="p-2 text-right">{(1294631965 - totalContract).toLocaleString(undefined, {maximumFractionDigits: 0})}</td>
                 </tr>
               </tbody>
             </table>
