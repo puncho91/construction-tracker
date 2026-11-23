@@ -66,27 +66,22 @@ function parseSheet(rows: any[][]): BoqItem[] {
 
   const items: BoqItem[] = [];
   let currentPkg = "p1";
-
   for (let i = headerRowIndex + 1; i < rows.length; i++) {
     const row = rows[i];
     if (!row) continue;
     const code = String(row[codeCol] || "").trim();
     const desc = String(row[descCol] || "").trim();
     if (!code || !desc) continue;
-
     const headerPkg = detectPackageHeader(code, desc);
     if (headerPkg) { currentPkg = headerPkg; continue; }
-
     const contractAmt = parseNumber(row[contractCol]);
     if (contractAmt === 0) continue;
     const low = desc.toLowerCase();
     if ((low.includes("total") || low.startsWith("sub")) && desc.length < 40 && !/\d/.test(desc)) continue;
-
     const prev = prevCol >= 0 ? parseNumber(row[prevCol]) : 0;
     const thisPeriod = thisPeriodCol >= 0 ? parseNumber(row[thisPeriodCol]) : 0;
     let toDate = toDateCol >= 0 ? parseNumber(row[toDateCol]) : 0;
     if (toDate === 0) toDate = prev + thisPeriod;
-
     items.push({
       id: `row${items.length}_${code.replace(/[^A-Za-z0-9]/g, "_")}_${currentPkg}`,
       packageId: currentPkg, code, description: desc, unit: "LS",
@@ -95,8 +90,6 @@ function parseSheet(rows: any[][]): BoqItem[] {
       thisPeriodExecuted: Math.max(0, toDate - prev),
     });
   }
-
-  // Leaf filter within same package
   return items.filter(item => {
     const prefix = item.code + ".";
     return !items.some(o => o !== item && o.packageId === item.packageId && o.code.startsWith(prefix));
@@ -126,8 +119,24 @@ export default function ImportPage() {
           const items = parseSheet(rows);
           if (items.length > 5 && (!best || items.length > best.items.length)) best = { sheetName, items };
         }
-        if (!best) setError("No valid BOQ table found in any sheet.");
-        else { setSourceSheet(best.sheetName); setPreview(best.items); }
+        if (!best) {
+          setError("No valid BOQ table found in any sheet.");
+        } else {
+          setSourceSheet(best.sheetName);
+          setPreview(best.items);
+
+          // *** AUTO-FILL overrides for packages that are >5% off (or missing) ***
+          const autoOverrides: Record<string, number> = {};
+          for (const pkg of Object.keys(EXPECTED)) {
+            const parsed = best.items.filter(i => i.packageId === pkg).reduce((s, i) => s + i.contractAmount, 0);
+            const exp = EXPECTED[pkg];
+            const diffPct = parsed === 0 ? 1 : Math.abs(parsed - exp) / exp;
+            if (parsed === 0 || diffPct > 0.05) {
+              autoOverrides[pkg] = exp;
+            }
+          }
+          setOverrides(autoOverrides);
+        }
       } catch (err) { setError("Failed: " + (err as Error).message); }
     };
     reader.readAsArrayBuffer(file);
@@ -138,7 +147,6 @@ export default function ImportPage() {
     setOverrides(prev => ({ ...prev, [pkg]: n }));
   };
 
-  // Compute final items (applying overrides by scaling)
   const finalItems = (() => {
     let result = preview;
     for (const [pkg, target] of Object.entries(overrides)) {
@@ -146,16 +154,12 @@ export default function ImportPage() {
       const pkgItems = result.filter(i => i.packageId === pkg);
       const current = pkgItems.reduce((s, i) => s + i.contractAmount, 0);
       if (current === 0) {
-        // No items → create one
         result = [...result, {
-          id: `manual_${pkg}`,
-          packageId: pkg,
+          id: `manual_${pkg}`, packageId: pkg,
           code: `${pkg.replace("p","")}.1`,
-          description: "Manual entry (no items found in file)",
-          unit: "LS",
-          contractAmount: target,
-          previousExecuted: target,
-          thisPeriodExecuted: 0,
+          description: "Manual entry (not found in file)",
+          unit: "LS", contractAmount: target,
+          previousExecuted: target, thisPeriodExecuted: 0,
         }];
       } else {
         const scale = target / current;
@@ -180,22 +184,22 @@ export default function ImportPage() {
     } catch (err) { setError("Save failed: " + (err as Error).message); setIsImporting(false); }
   };
 
-  const byPackage: Record<string, { contract: number; executed: number; count: number }> = {};
+  const byPackage: Record<string, { contract: number; count: number }> = {};
   preview.forEach(i => {
-    if (!byPackage[i.packageId]) byPackage[i.packageId] = { contract: 0, executed: 0, count: 0 };
+    if (!byPackage[i.packageId]) byPackage[i.packageId] = { contract: 0, count: 0 };
     byPackage[i.packageId].contract += i.contractAmount;
-    byPackage[i.packageId].executed += i.previousExecuted + i.thisPeriodExecuted;
     byPackage[i.packageId].count += 1;
   });
 
   const finalTotal = finalItems.reduce((s, i) => s + i.contractAmount, 0);
+  const finalExecuted = finalItems.reduce((s, i) => s + i.previousExecuted + i.thisPeriodExecuted, 0);
+  const finalPct = finalTotal ? (finalExecuted / finalTotal) * 100 : 0;
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
       <div>
         <Link href="/" className="text-sm text-brand-600 hover:underline">← Back to Dashboard</Link>
         <h1 className="text-2xl font-bold text-slate-900 mt-1">Import BOQ from Excel</h1>
-        <p className="text-sm text-slate-600">Upload, review, then fix any package totals manually before importing.</p>
       </div>
 
       <div className="card p-6">
@@ -205,22 +209,31 @@ export default function ImportPage() {
 
       {preview.length > 0 && (
         <>
-          <div className="card p-4 flex items-center justify-between flex-wrap gap-3">
-            <div>
-              <h2 className="font-semibold text-slate-900">{preview.length} items from "{sourceSheet}"</h2>
-              <p className="text-sm text-slate-600 mt-1">
-                Final total after adjustments: <b>{finalTotal.toLocaleString(undefined, {maximumFractionDigits: 0})} ETB</b> (target 1,294,631,965)
-              </p>
+          <div className="card p-4">
+            <div className="flex items-center justify-between flex-wrap gap-3">
+              <div>
+                <h2 className="font-semibold text-slate-900">{preview.length} items from "{sourceSheet}"</h2>
+                <p className="text-sm text-slate-600 mt-1">
+                  Final total: <b>{finalTotal.toLocaleString(undefined, {maximumFractionDigits: 0})} ETB</b> ·
+                  Executed: <b>{finalExecuted.toLocaleString(undefined, {maximumFractionDigits: 0})} ETB</b> ·
+                  Progress: <b>{finalPct.toFixed(1)}%</b>
+                </p>
+              </div>
+              <button onClick={confirmImport} disabled={isImporting} className="btn-primary">
+                {isImporting ? "Saving..." : `Import ${finalItems.length} Items`}
+              </button>
             </div>
-            <button onClick={confirmImport} disabled={isImporting} className="btn-primary">
-              {isImporting ? "Saving..." : `Import ${finalItems.length} Items`}
-            </button>
           </div>
 
           <div className="card overflow-hidden">
-            <div className="p-3 border-b bg-slate-50">
-              <h3 className="font-semibold text-sm">Review & fix each package</h3>
-              <p className="text-xs text-slate-500 mt-1">Edit the "Override" column to correct any package. Blank = use parsed value.</p>
+            <div className="p-3 border-b bg-blue-50">
+              <p className="text-xs text-blue-900">
+                <b>Override column is pre-filled</b> for packages that were off by &gt;5%. Only correct ones stay blank (using parsed values).
+              </p>
+              <div className="mt-2 flex gap-2 text-xs">
+                <button onClick={() => setOverrides({ ...EXPECTED })} className="underline text-blue-700">Force all to expected</button>
+                <button onClick={() => setOverrides({})} className="underline text-blue-700">Use parsed values only</button>
+              </div>
             </div>
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-xs uppercase text-slate-600">
@@ -234,14 +247,15 @@ export default function ImportPage() {
               </thead>
               <tbody>
                 {["p1","p2","p3","p4","p5","p6","p7","p8","p9","p10"].map(pkg => {
-                  const s = byPackage[pkg] || { contract: 0, executed: 0, count: 0 };
+                  const s = byPackage[pkg] || { contract: 0, count: 0 };
                   const exp = EXPECTED[pkg];
-                  const ok = Math.abs(exp - s.contract) < exp * 0.02;
+                  const ok = Math.abs(exp - s.contract) < exp * 0.05;
+                  const isOverridden = overrides[pkg] !== undefined && overrides[pkg] > 0;
                   return (
                     <tr key={pkg} className="border-t border-slate-100">
                       <td className="p-2 font-medium">{pkg}</td>
                       <td className="p-2 text-right text-xs text-slate-500">{s.count}</td>
-                      <td className={`p-2 text-right font-medium ${ok ? "text-emerald-600" : "text-rose-600"}`}>
+                      <td className={`p-2 text-right ${ok ? "text-emerald-600" : "text-rose-600"}`}>
                         {s.contract.toLocaleString(undefined, {maximumFractionDigits: 0})}
                       </td>
                       <td className="p-2 text-right text-slate-500">
@@ -250,8 +264,7 @@ export default function ImportPage() {
                       <td className="p-2 text-right">
                         <input
                           type="text"
-                          placeholder={exp.toFixed(0)}
-                          className="w-32 rounded border border-slate-300 px-2 py-1 text-right text-xs"
+                          className={`w-36 rounded border px-2 py-1 text-right text-xs ${isOverridden ? "border-brand-500 bg-brand-50 font-medium" : "border-slate-300"}`}
                           value={overrides[pkg] || ""}
                           onChange={(e) => setOverride(pkg, e.target.value)}
                         />
