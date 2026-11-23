@@ -2,15 +2,14 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import Papa from "papaparse";
+import * as XLSX from "xlsx";
 import Link from "next/link";
 import { BoqItem } from "@/lib/types";
 import { useItems } from "@/hooks/useStore";
-import { SEED_PACKAGES } from "@/lib/data";
 
 // Helper to clean numbers (remove commas, spaces, ETB, etc.)
 const parseNumber = (val: any) => {
-  if (!val) return 0;
+  if (val === undefined || val === null) return 0;
   const cleaned = String(val).replace(/,/g, "").replace(/[^0-9.-]/g, "");
   return Number(cleaned) || 0;
 };
@@ -28,31 +27,41 @@ export default function ImportPage() {
     setError("");
     setPreview([]);
 
-    Papa.parse(file, {
-      header: false,
-      skipEmptyLines: true,
-      complete: (results) => {
-        const rows = results.data as string[][];
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const data = new Uint8Array(event.target?.result as ArrayBuffer);
+        const workbook = XLSX.read(data, { type: "array" });
+
+        // Look for the sheet that contains "Executed Qty" or fall back to the first sheet
+        let sheetName = workbook.SheetNames.find((name) => name.toLowerCase().includes("executed"));
+        if (!sheetName) sheetName = workbook.SheetNames[0]; // Fallback
+        
+        const worksheet = workbook.Sheets[sheetName];
+        // Convert sheet to array of arrays
+        const rows = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
+
         const importedItems: BoqItem[] = [];
         let isBoqSection = false;
 
         rows.forEach((row) => {
-          // The header row where we find the BOQ columns
-          if (row[10]?.trim() === "Item No") {
+          // The header row where we find the BOQ columns (Column K / Index 10)
+          if (String(row[10] || "").trim() === "Item No") {
             isBoqSection = true;
             return;
           }
 
           if (!isBoqSection) return;
 
-          const code = row[10]?.trim();
-          const description = row[11]?.trim();
+          const code = String(row[10] || "").trim();
+          const description = String(row[11] || "").trim();
           const contractAmount = parseNumber(row[14]);
           const previousExecuted = parseNumber(row[15]);
           
           // To Date Executed is usually column 21 (0-indexed)
-          // If it's blank, we calculate it from the percentage (column 17) if available
           let toDateExecuted = parseNumber(row[21]);
+          
+          // If toDateExecuted is 0, try calculating it from the percentage (column 17)
           if (toDateExecuted === 0 && row[17]) {
              const pct = parseNumber(row[17]);
              toDateExecuted = (pct / 100) * contractAmount;
@@ -74,7 +83,7 @@ export default function ImportPage() {
             packageId,
             code,
             description,
-            unit: "LS", // Default unit
+            unit: "LS",
             contractAmount,
             previousExecuted,
             thisPeriodExecuted: thisPeriod,
@@ -82,12 +91,16 @@ export default function ImportPage() {
         });
 
         if (importedItems.length === 0) {
-          setError("Could not find valid BOQ rows. Make sure you upload the correct CSV format.");
+          setError(`Found sheet "${sheetName}", but could not find valid BOQ rows. Ensure Column K has "Item No".`);
         } else {
           setPreview(importedItems);
         }
-      },
-    });
+      } catch (err) {
+        console.error(err);
+        setError("Failed to read the Excel file. Please make sure it is a valid .xlsx file.");
+      }
+    };
+    reader.readAsArrayBuffer(file);
   };
 
   const confirmImport = async () => {
@@ -106,13 +119,13 @@ export default function ImportPage() {
       <div className="flex items-center justify-between">
         <div>
           <Link href="/" className="text-sm text-brand-600 hover:underline">← Back to Dashboard</Link>
-          <h1 className="text-2xl font-bold text-slate-900 mt-1">Import BOQ from CSV</h1>
-          <p className="text-sm text-slate-600">Upload the weekly progress report CSV to instantly update all items.</p>
+          <h1 className="text-2xl font-bold text-slate-900 mt-1">Import BOQ from Excel</h1>
+          <p className="text-sm text-slate-600">Upload your Weekly Progress Report (.xlsx) directly. The app will find the correct sheet automatically.</p>
         </div>
       </div>
 
       <div className="card p-6">
-        <input type="file" accept=".csv" onChange={handleFileUpload} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-brand-50 file:text-brand-700 hover:file:bg-brand-100" />
+        <input type="file" accept=".xlsx, .xls" onChange={handleFileUpload} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-brand-50 file:text-brand-700 hover:file:bg-brand-100" />
         {error && <div className="mt-4 p-3 bg-rose-50 text-rose-700 rounded-lg text-sm">{error}</div>}
       </div>
 
