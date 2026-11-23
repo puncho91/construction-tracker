@@ -12,6 +12,13 @@ const parseNumber = (val: any) => {
   return Number(cleaned) || 0;
 };
 
+// Expected contract totals per package (for verification only)
+const EXPECTED: Record<string, number> = {
+  p1: 9900000, p2: 11333775.92, p3: 239123163.72, p4: 155119536,
+  p5: 15759998.65, p6: 19748183.62, p7: 415403544.80,
+  p8: 275204660.39, p9: 38925979.96, p10: 114113122.30,
+};
+
 function parseSheet(rows: any[][]): BoqItem[] {
   let headerRowIndex = -1, codeCol = -1, descCol = -1;
 
@@ -53,15 +60,26 @@ function parseSheet(rows: any[][]): BoqItem[] {
   }
   if (contractCol === -1) return [];
 
-  // Build raw items
-  const items: Record<string, BoqItem> = {};
+  // Build items as an ARRAY (preserves duplicates)
+  const items: BoqItem[] = [];
+  let currentPkg = "p1";
+
   for (let i = headerRowIndex + 1; i < rows.length; i++) {
     const row = rows[i];
     if (!row) continue;
     const code = String(row[codeCol] || "").trim();
     const desc = String(row[descCol] || "").trim();
     if (!code || !desc) continue;
-    if (!/^\d+(\.\d+)*$/.test(code)) continue;
+
+    // Track current package (letter codes inherit last numeric package)
+    const pkgMatch = code.match(/^(\d+)/);
+    if (pkgMatch) currentPkg = `p${pkgMatch[1]}`;
+
+    // Skip obvious headers/totals
+    if (code.length > 20) continue;
+    if (/^(no|total|sub\s*total|grand\s*total|description|item|amount|unit|qty|quantity|remark|remarks)$/i.test(code)) continue;
+    const low = desc.toLowerCase();
+    if ((low.includes("total") || low.startsWith("sub")) && desc.length < 40 && !/\d/.test(desc)) continue;
 
     const contractAmt = parseNumber(row[contractCol]);
     if (contractAmt === 0) continue;
@@ -71,29 +89,28 @@ function parseSheet(rows: any[][]): BoqItem[] {
     let toDate = toDateCol >= 0 ? parseNumber(row[toDateCol]) : 0;
     if (toDate === 0) toDate = prev + thisPeriod;
 
-    const packageNum = code.split(".")[0];
-    const id = `i${code.replace(/\./g, "_")}_p${packageNum}`;
+    // Row-indexed ID → each row is unique, no overwrites
+    const id = `row${items.length}_${code.replace(/[^A-Za-z0-9]/g, "_")}_${currentPkg}`;
 
-    items[id] = {
+    items.push({
       id,
-      packageId: `p${packageNum}`,
+      packageId: currentPkg,
       code,
       description: desc,
       unit: "LS",
       contractAmount: contractAmt,
       previousExecuted: prev,
       thisPeriodExecuted: Math.max(0, toDate - prev),
-    };
+    });
   }
 
-  // *** KEY FIX: Keep only leaf items ***
-  const allCodes = Object.values(items).map(i => i.code);
-  const leafItems = Object.values(items).filter(item => {
+  // Leaf filter: drop rows that have children (e.g. parent "7" when "7.1" exists)
+  const leaves = items.filter(item => {
     const prefix = item.code + ".";
-    return !allCodes.some(c => c !== item.code && c.startsWith(prefix));
+    return !items.some(other => other !== item && other.code.startsWith(prefix));
   });
 
-  return leafItems;
+  return leaves;
 }
 
 export default function ImportPage() {
@@ -154,12 +171,12 @@ export default function ImportPage() {
   const totalContract = preview.reduce((s, i) => s + i.contractAmount, 0);
   const totalToDate = preview.reduce((s, i) => s + i.previousExecuted + i.thisPeriodExecuted, 0);
 
-  // Group by package for verification
-  const byPackage: Record<string, { contract: number; executed: number }> = {};
+  const byPackage: Record<string, { contract: number; executed: number; count: number }> = {};
   preview.forEach(i => {
-    if (!byPackage[i.packageId]) byPackage[i.packageId] = { contract: 0, executed: 0 };
+    if (!byPackage[i.packageId]) byPackage[i.packageId] = { contract: 0, executed: 0, count: 0 };
     byPackage[i.packageId].contract += i.contractAmount;
     byPackage[i.packageId].executed += i.previousExecuted + i.thisPeriodExecuted;
+    byPackage[i.packageId].count += 1;
   });
 
   return (
@@ -167,7 +184,7 @@ export default function ImportPage() {
       <div>
         <Link href="/" className="text-sm text-brand-600 hover:underline">← Back to Dashboard</Link>
         <h1 className="text-2xl font-bold text-slate-900 mt-1">Import BOQ from Excel</h1>
-        <p className="text-sm text-slate-600">Scans all sheets, auto-detects BOQ, keeps only leaf items (no parent double-counting).</p>
+        <p className="text-sm text-slate-600">Scans all sheets. Preserves duplicate codes and letter-coded sub-items.</p>
       </div>
 
       <div className="card p-6">
@@ -180,7 +197,7 @@ export default function ImportPage() {
           <div className="card p-4">
             <div className="flex items-center justify-between flex-wrap gap-3">
               <div>
-                <h2 className="font-semibold text-slate-900">Preview: {preview.length} leaf items from "{sourceSheet}"</h2>
+                <h2 className="font-semibold text-slate-900">Preview: {preview.length} items from "{sourceSheet}"</h2>
                 <p className="text-xs text-slate-500 mt-1">
                   Total contract: <b>{totalContract.toLocaleString()} ETB</b> · Executed: <b>{totalToDate.toLocaleString()} ETB</b> · Progress: <b>{totalContract ? ((totalToDate / totalContract) * 100).toFixed(1) : 0}%</b>
                 </p>
@@ -194,21 +211,43 @@ export default function ImportPage() {
 
           <div className="card overflow-hidden">
             <div className="p-3 border-b bg-slate-50">
-              <h3 className="font-semibold text-sm">Package totals (verify these look right)</h3>
+              <h3 className="font-semibold text-sm">Package verification (compare with Summary Report)</h3>
             </div>
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-xs uppercase text-slate-600">
-                <tr><th className="p-2 text-left">Package</th><th className="p-2 text-right">Contract</th><th className="p-2 text-right">Executed</th><th className="p-2 text-right">%</th></tr>
+                <tr>
+                  <th className="p-2 text-left">Package</th>
+                  <th className="p-2 text-right">Items</th>
+                  <th className="p-2 text-right">Actual Contract</th>
+                  <th className="p-2 text-right">Expected</th>
+                  <th className="p-2 text-right">Gap</th>
+                </tr>
               </thead>
               <tbody>
-                {Object.entries(byPackage).sort().map(([pkg, s]) => (
-                  <tr key={pkg} className="border-t border-slate-100">
-                    <td className="p-2">{pkg}</td>
-                    <td className="p-2 text-right">{s.contract.toLocaleString()}</td>
-                    <td className="p-2 text-right">{s.executed.toLocaleString()}</td>
-                    <td className="p-2 text-right">{s.contract ? ((s.executed / s.contract) * 100).toFixed(1) : 0}%</td>
-                  </tr>
-                ))}
+                {["p1","p2","p3","p4","p5","p6","p7","p8","p9","p10"].map(pkg => {
+                  const s = byPackage[pkg] || { contract: 0, executed: 0, count: 0 };
+                  const exp = EXPECTED[pkg] || 0;
+                  const gap = exp - s.contract;
+                  const ok = Math.abs(gap) < exp * 0.02;
+                  return (
+                    <tr key={pkg} className="border-t border-slate-100">
+                      <td className="p-2">{pkg}</td>
+                      <td className="p-2 text-right text-xs text-slate-500">{s.count}</td>
+                      <td className="p-2 text-right">{s.contract.toLocaleString(undefined, {maximumFractionDigits: 0})}</td>
+                      <td className="p-2 text-right text-slate-500">{exp.toLocaleString(undefined, {maximumFractionDigits: 0})}</td>
+                      <td className={`p-2 text-right font-medium ${ok ? "text-emerald-600" : "text-rose-600"}`}>
+                        {ok ? "✓ OK" : `${gap.toLocaleString(undefined, {maximumFractionDigits: 0})}`}
+                      </td>
+                    </tr>
+                  );
+                })}
+                <tr className="border-t-2 border-slate-300 bg-slate-50 font-semibold">
+                  <td className="p-2">TOTAL</td>
+                  <td className="p-2 text-right text-xs">{preview.length}</td>
+                  <td className="p-2 text-right">{totalContract.toLocaleString(undefined, {maximumFractionDigits: 0})}</td>
+                  <td className="p-2 text-right">1,294,631,965</td>
+                  <td className="p-2 text-right">{(1294631965.36 - totalContract).toLocaleString(undefined, {maximumFractionDigits: 0})}</td>
+                </tr>
               </tbody>
             </table>
           </div>
