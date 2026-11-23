@@ -18,7 +18,6 @@ const EXPECTED: Record<string, number> = {
   p8: 275204660.39, p9: 38925979.96, p10: 114113122.30,
 };
 
-// Detect a package header row: integer 1-10 + description contains package keyword
 const PACKAGE_PATTERN = /works?|fee|fence|tower|perimeter/i;
 function detectPackageHeader(code: string, desc: string): string | null {
   if (!/^\d{1,2}$/.test(code)) return null;
@@ -31,7 +30,6 @@ function detectPackageHeader(code: string, desc: string): string | null {
 
 function parseSheet(rows: any[][]): BoqItem[] {
   let headerRowIndex = -1, codeCol = -1, descCol = -1;
-
   for (let i = 0; i < Math.min(rows.length, 100); i++) {
     const row = rows[i];
     if (!row) continue;
@@ -40,8 +38,7 @@ function parseSheet(rows: any[][]): BoqItem[] {
       if (cell === "item no" || cell === "item no." || cell === "item" || cell === "item number") {
         for (let k = j + 1; k < Math.min(j + 10, row.length); k++) {
           if (String(row[k] || "").toLowerCase().includes("description")) {
-            headerRowIndex = i; codeCol = j; descCol = k;
-            break;
+            headerRowIndex = i; codeCol = j; descCol = k; break;
           }
         }
         if (headerRowIndex !== -1) break;
@@ -53,7 +50,6 @@ function parseSheet(rows: any[][]): BoqItem[] {
 
   const headerRows = [rows[headerRowIndex], rows[headerRowIndex + 1], rows[headerRowIndex + 2]].filter(Boolean);
   let contractCol = -1, prevCol = -1, thisPeriodCol = -1, toDateCol = -1;
-
   for (let j = descCol + 1; j < rows[headerRowIndex].length; j++) {
     const combined = headerRows.map(r => String(r?.[j] || "")).join(" ").toLowerCase();
     if (contractCol === -1 && /(contract\s*(amount|value|price|sum))|(unit\s*rate)|(^|\s)rate(\s|$)/.test(combined) && !/previous|cumulative|to\s*date|this\s*period|%/.test(combined)) contractCol = j;
@@ -78,16 +74,11 @@ function parseSheet(rows: any[][]): BoqItem[] {
     const desc = String(row[descCol] || "").trim();
     if (!code || !desc) continue;
 
-    // *** KEY FIX: package detection by description, NOT code prefix ***
     const headerPkg = detectPackageHeader(code, desc);
-    if (headerPkg) {
-      currentPkg = headerPkg;
-      continue; // Skip the parent total row entirely
-    }
+    if (headerPkg) { currentPkg = headerPkg; continue; }
 
     const contractAmt = parseNumber(row[contractCol]);
     if (contractAmt === 0) continue;
-
     const low = desc.toLowerCase();
     if ((low.includes("total") || low.startsWith("sub")) && desc.length < 40 && !/\d/.test(desc)) continue;
 
@@ -98,27 +89,18 @@ function parseSheet(rows: any[][]): BoqItem[] {
 
     items.push({
       id: `row${items.length}_${code.replace(/[^A-Za-z0-9]/g, "_")}_${currentPkg}`,
-      packageId: currentPkg,
-      code,
-      description: desc,
-      unit: "LS",
+      packageId: currentPkg, code, description: desc, unit: "LS",
       contractAmount: contractAmt,
       previousExecuted: prev,
       thisPeriodExecuted: Math.max(0, toDate - prev),
     });
   }
 
-  // *** KEY FIX: leaf filter scoped to SAME package only ***
-  const leaves = items.filter(item => {
+  // Leaf filter within same package
+  return items.filter(item => {
     const prefix = item.code + ".";
-    return !items.some(other =>
-      other !== item &&
-      other.packageId === item.packageId &&
-      other.code.startsWith(prefix)
-    );
+    return !items.some(o => o !== item && o.packageId === item.packageId && o.code.startsWith(prefix));
   });
-
-  return leaves;
 }
 
 export default function ImportPage() {
@@ -126,58 +108,77 @@ export default function ImportPage() {
   const [preview, setPreview] = useState<BoqItem[]>([]);
   const [sourceSheet, setSourceSheet] = useState("");
   const [error, setError] = useState("");
-  const [triedSheets, setTriedSheets] = useState<string[]>([]);
+  const [overrides, setOverrides] = useState<Record<string, number>>({});
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    setError(""); setPreview([]); setSourceSheet(""); setTriedSheets([]);
-
+    setError(""); setPreview([]); setSourceSheet(""); setOverrides({});
     const reader = new FileReader();
     reader.onload = (event) => {
       try {
         const data = new Uint8Array(event.target?.result as ArrayBuffer);
         const workbook = XLSX.read(data, { type: "array" });
-        const tried: string[] = [];
-        let bestResult: { sheetName: string; items: BoqItem[] } | null = null;
-
+        let best: { sheetName: string; items: BoqItem[] } | null = null;
         for (const sheetName of workbook.SheetNames) {
-          tried.push(sheetName);
           const ws = workbook.Sheets[sheetName];
           const rows = XLSX.utils.sheet_to_json(ws, { header: 1 }) as any[][];
           const items = parseSheet(rows);
-          if (items.length > 5 && (!bestResult || items.length > bestResult.items.length)) {
-            bestResult = { sheetName, items };
-          }
+          if (items.length > 5 && (!best || items.length > best.items.length)) best = { sheetName, items };
         }
-
-        setTriedSheets(tried);
-        if (!bestResult) {
-          setError(`Tried ${tried.length} sheets (${tried.join(", ")}), but none had a valid BOQ table.`);
-        } else {
-          setSourceSheet(bestResult.sheetName);
-          setPreview(bestResult.items);
-        }
-      } catch (err) {
-        setError("Failed to read file: " + (err as Error).message);
-      }
+        if (!best) setError("No valid BOQ table found in any sheet.");
+        else { setSourceSheet(best.sheetName); setPreview(best.items); }
+      } catch (err) { setError("Failed: " + (err as Error).message); }
     };
     reader.readAsArrayBuffer(file);
   };
 
+  const setOverride = (pkg: string, val: string) => {
+    const n = parseNumber(val);
+    setOverrides(prev => ({ ...prev, [pkg]: n }));
+  };
+
+  // Compute final items (applying overrides by scaling)
+  const finalItems = (() => {
+    let result = preview;
+    for (const [pkg, target] of Object.entries(overrides)) {
+      if (!target || target <= 0) continue;
+      const pkgItems = result.filter(i => i.packageId === pkg);
+      const current = pkgItems.reduce((s, i) => s + i.contractAmount, 0);
+      if (current === 0) {
+        // No items → create one
+        result = [...result, {
+          id: `manual_${pkg}`,
+          packageId: pkg,
+          code: `${pkg.replace("p","")}.1`,
+          description: "Manual entry (no items found in file)",
+          unit: "LS",
+          contractAmount: target,
+          previousExecuted: target,
+          thisPeriodExecuted: 0,
+        }];
+      } else {
+        const scale = target / current;
+        result = result.map(i => i.packageId === pkg
+          ? { ...i,
+              contractAmount: +(i.contractAmount * scale).toFixed(2),
+              previousExecuted: +(i.previousExecuted * scale).toFixed(2),
+              thisPeriodExecuted: +(i.thisPeriodExecuted * scale).toFixed(2),
+            }
+          : i
+        );
+      }
+    }
+    return result;
+  })();
+
   const confirmImport = async () => {
     setIsImporting(true); setError("");
     try {
-      await store.setItems(preview);
+      await store.setItems(finalItems);
       window.location.href = "/";
-    } catch (err) {
-      setError("Import failed: " + (err as Error).message);
-      setIsImporting(false);
-    }
+    } catch (err) { setError("Save failed: " + (err as Error).message); setIsImporting(false); }
   };
-
-  const totalContract = preview.reduce((s, i) => s + i.contractAmount, 0);
-  const totalToDate = preview.reduce((s, i) => s + i.previousExecuted + i.thisPeriodExecuted, 0);
 
   const byPackage: Record<string, { contract: number; executed: number; count: number }> = {};
   preview.forEach(i => {
@@ -187,12 +188,14 @@ export default function ImportPage() {
     byPackage[i.packageId].count += 1;
   });
 
+  const finalTotal = finalItems.reduce((s, i) => s + i.contractAmount, 0);
+
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
+    <div className="max-w-5xl mx-auto space-y-6">
       <div>
         <Link href="/" className="text-sm text-brand-600 hover:underline">← Back to Dashboard</Link>
         <h1 className="text-2xl font-bold text-slate-900 mt-1">Import BOQ from Excel</h1>
-        <p className="text-sm text-slate-600">Scans all sheets. Detects package headers by description, not code prefix.</p>
+        <p className="text-sm text-slate-600">Upload, review, then fix any package totals manually before importing.</p>
       </div>
 
       <div className="card p-6">
@@ -202,60 +205,60 @@ export default function ImportPage() {
 
       {preview.length > 0 && (
         <>
-          <div className="card p-4">
-            <div className="flex items-center justify-between flex-wrap gap-3">
-              <div>
-                <h2 className="font-semibold text-slate-900">Preview: {preview.length} items from "{sourceSheet}"</h2>
-                <p className="text-xs text-slate-500 mt-1">
-                  Total contract: <b>{totalContract.toLocaleString(undefined, {maximumFractionDigits: 0})} ETB</b> · Executed: <b>{totalToDate.toLocaleString(undefined, {maximumFractionDigits: 0})} ETB</b> · Progress: <b>{totalContract ? ((totalToDate / totalContract) * 100).toFixed(1) : 0}%</b>
-                </p>
-                <p className="text-[10px] text-slate-400 mt-1">Scanned: {triedSheets.join(", ")}</p>
-              </div>
-              <button onClick={confirmImport} disabled={isImporting} className="btn-primary">
-                {isImporting ? "Saving..." : `Import All ${preview.length} Items`}
-              </button>
+          <div className="card p-4 flex items-center justify-between flex-wrap gap-3">
+            <div>
+              <h2 className="font-semibold text-slate-900">{preview.length} items from "{sourceSheet}"</h2>
+              <p className="text-sm text-slate-600 mt-1">
+                Final total after adjustments: <b>{finalTotal.toLocaleString(undefined, {maximumFractionDigits: 0})} ETB</b> (target 1,294,631,965)
+              </p>
             </div>
+            <button onClick={confirmImport} disabled={isImporting} className="btn-primary">
+              {isImporting ? "Saving..." : `Import ${finalItems.length} Items`}
+            </button>
           </div>
 
           <div className="card overflow-hidden">
             <div className="p-3 border-b bg-slate-50">
-              <h3 className="font-semibold text-sm">Package verification (green = matches expected)</h3>
+              <h3 className="font-semibold text-sm">Review & fix each package</h3>
+              <p className="text-xs text-slate-500 mt-1">Edit the "Override" column to correct any package. Blank = use parsed value.</p>
             </div>
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-xs uppercase text-slate-600">
                 <tr>
                   <th className="p-2 text-left">Package</th>
                   <th className="p-2 text-right">Items</th>
-                  <th className="p-2 text-right">Actual</th>
+                  <th className="p-2 text-right">Parsed</th>
                   <th className="p-2 text-right">Expected</th>
-                  <th className="p-2 text-right">Status</th>
+                  <th className="p-2 text-right">Override</th>
                 </tr>
               </thead>
               <tbody>
                 {["p1","p2","p3","p4","p5","p6","p7","p8","p9","p10"].map(pkg => {
                   const s = byPackage[pkg] || { contract: 0, executed: 0, count: 0 };
                   const exp = EXPECTED[pkg];
-                  const gap = exp - s.contract;
-                  const ok = Math.abs(gap) < exp * 0.02;
+                  const ok = Math.abs(exp - s.contract) < exp * 0.02;
                   return (
                     <tr key={pkg} className="border-t border-slate-100">
-                      <td className="p-2">{pkg}</td>
+                      <td className="p-2 font-medium">{pkg}</td>
                       <td className="p-2 text-right text-xs text-slate-500">{s.count}</td>
-                      <td className="p-2 text-right">{s.contract.toLocaleString(undefined, {maximumFractionDigits: 0})}</td>
-                      <td className="p-2 text-right text-slate-500">{exp.toLocaleString(undefined, {maximumFractionDigits: 0})}</td>
                       <td className={`p-2 text-right font-medium ${ok ? "text-emerald-600" : "text-rose-600"}`}>
-                        {ok ? "✓ OK" : gap > 0 ? `Missing ${gap.toLocaleString(undefined, {maximumFractionDigits: 0})}` : `Extra ${(-gap).toLocaleString(undefined, {maximumFractionDigits: 0})}`}
+                        {s.contract.toLocaleString(undefined, {maximumFractionDigits: 0})}
+                      </td>
+                      <td className="p-2 text-right text-slate-500">
+                        {exp.toLocaleString(undefined, {maximumFractionDigits: 0})}
+                      </td>
+                      <td className="p-2 text-right">
+                        <input
+                          type="text"
+                          placeholder={exp.toFixed(0)}
+                          className="w-32 rounded border border-slate-300 px-2 py-1 text-right text-xs"
+                          value={overrides[pkg] || ""}
+                          onChange={(e) => setOverride(pkg, e.target.value)}
+                        />
                       </td>
                     </tr>
                   );
                 })}
-                <tr className="border-t-2 border-slate-300 bg-slate-50 font-semibold">
-                  <td className="p-2">TOTAL</td>
-                  <td className="p-2 text-right text-xs">{preview.length}</td>
-                  <td className="p-2 text-right">{totalContract.toLocaleString(undefined, {maximumFractionDigits: 0})}</td>
-                  <td className="p-2 text-right">1,294,631,965</td>
-                  <td className="p-2 text-right">{(1294631965 - totalContract).toLocaleString(undefined, {maximumFractionDigits: 0})}</td>
-                </tr>
               </tbody>
             </table>
           </div>
